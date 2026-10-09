@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools >= 77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tempconv"
+description = "A simple example package that converts temperature units"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+version = "0.0.0"
+license = "MIT"
+
+[[project.authors]]
+name = "Weiyin Fang"
+email = "happy_is_used@outlook.com"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}

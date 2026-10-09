@@ -1,0 +1,100 @@
+stages:
+  - build
+  - deploy
+
+variables:
+  # Path where the service account key is written inside the job
+  GOOGLE_APPLICATION_CREDENTIALS: "$CI_PROJECT_DIR/gcp-key.json"
+
+# Shared steps: check variables, write the service account key, log in to gcloud
+.gcp-auth:
+  before_script:
+    - |
+      for var in GCP_CREDENTIALS GCP_PROJECT_ID $REQUIRED_VARS; do
+        if [ -z "$(eval echo "\$$var")" ]; then
+          echo "CI/CD variable $var is not set"
+          exit 1
+        fi
+      done
+    # Works for both Variable and File type CI/CD variables
+    - |
+      if [ -f "$GCP_CREDENTIALS" ]; then
+        export GOOGLE_APPLICATION_CREDENTIALS="$GCP_CREDENTIALS"
+      else
+        printf '%s\n' "$GCP_CREDENTIALS" > "$GOOGLE_APPLICATION_CREDENTIALS"
+      fi
+    - gcloud auth activate-service-account --key-file="$GOOGLE_APPLICATION_CREDENTIALS"
+    - gcloud config set project "$GCP_PROJECT_ID"
+
+# ------------------------------
+# master: build the MkDocs static site
+# ------------------------------
+build_master:
+  stage: build
+  image: python:3.11
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master"'
+  script:
+    - pip install --no-cache-dir -r requirements.txt
+    - mkdocs build --strict -d site
+  artifacts:
+    paths:
+      - site
+    expire_in: 1 hour
+
+# ------------------------------
+# master: publish the site to a GCS bucket (production environment)
+# ------------------------------
+deploy_master:
+  stage: deploy
+  image: google/cloud-sdk:slim
+  needs: ["build_master"]
+  extends: .gcp-auth
+  variables:
+    REQUIRED_VARS: "GCS_BUCKET"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master"'
+  script:
+    - echo "Uploading to bucket gs://$GCS_BUCKET"
+    - gsutil -m rsync -r ./site "gs://$GCS_BUCKET"
+  environment:
+    name: production
+    url: "https://storage.googleapis.com/$GCS_BUCKET/index.html"
+
+# ------------------------------
+# staging: build the Nginx image, push it to Artifact Registry and deploy to Cloud Run
+# ------------------------------
+build_and_deploy_staging:
+  stage: deploy
+  image: google/cloud-sdk:slim
+  extends: .gcp-auth
+  services:
+    - name: docker:24.0.5-dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+    REQUIRED_VARS: "GCP_REGION REPOSITORY_PATH"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "staging"'
+  script:
+    - yes | gcloud auth configure-docker "$GCP_REGION-docker.pkg.dev"
+    - IMAGE="${REPOSITORY_PATH}/mkdocs-site:${CI_COMMIT_SHORT_SHA}"
+    - docker build -t "$IMAGE" .
+    - docker push "$IMAGE"
+    - |
+      gcloud run deploy mkdocs-staging \
+        --image="$IMAGE" \
+        --region="$GCP_REGION" \
+        --platform=managed \
+        --allow-unauthenticated \
+        --port=8080
+    # Pass the Cloud Run URL to the GitLab environment
+    - STAGING_URL=$(gcloud run services describe mkdocs-staging --region="$GCP_REGION" --format='value(status.url)')
+    - echo "STAGING_URL=$STAGING_URL" >> deploy.env
+    - echo "Deployed staging URL $STAGING_URL"
+  artifacts:
+    reports:
+      dotenv: deploy.env
+  environment:
+    name: staging
+    url: $STAGING_URL

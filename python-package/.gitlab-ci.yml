@@ -1,0 +1,119 @@
+image: python:3.11
+
+stages:
+  - lint
+  - test
+  - build
+  - publish
+
+variables:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+# --------------------------
+# LINT JOB
+# --------------------------
+lint:
+  stage: lint
+  script:
+    - pip install pylint pytest
+    - pip install .
+    - pylint src/ tests/
+
+# --------------------------
+# TEST JOB
+# --------------------------
+test:
+  stage: test
+  needs: ["lint"]
+  script:
+    - pip install pytest pytest-cov
+    - pip install .
+    - pytest --cov=tempconv --cov-report=term --cov-report=xml:coverage.xml --junitxml=report.xml
+  coverage: '/^TOTAL.+?(\d+(?:\.\d+)?%)$/'
+  artifacts:
+    when: always
+    paths:
+      - coverage.xml
+      - report.xml
+    reports:
+      junit: report.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+
+# --------------------------
+# BUILD JOB
+# --------------------------
+build:
+  stage: build
+  needs: ["test"]
+  script:
+    - pip install build
+    - |
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        # Accept x.y.z tags, optionally with a local version suffix (x.y.z+abc)
+        if ! echo "$CI_COMMIT_TAG" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(\+[A-Za-z0-9.]+)?$'; then
+          echo "Tag '$CI_COMMIT_TAG' is not a valid x.y.z or x.y.z+local version, refusing to release"
+          exit 1
+        fi
+
+        # Use the tag as the package version
+        sed -i "s/^version = .*/version = \"$CI_COMMIT_TAG\"/" pyproject.toml
+        echo "Updated version in pyproject.toml:"
+        grep "^version" pyproject.toml
+      else
+        echo "Regular push, using default version 0.0.0"
+      fi
+    - python -m build
+  artifacts:
+    paths:
+      - dist/
+
+# --------------------------
+# PUBLISH JOB
+# --------------------------
+publish:
+  stage: publish
+  image: python:3.11-slim
+  needs: ["build"]
+  rules:
+    - if: '$CI_COMMIT_TAG'
+      when: on_success
+    - when: never
+
+  before_script:
+    # Check required CI/CD variables
+    - |
+      for var in GCP_CREDENTIALS GAR_LOCATION GCP_PROJECT_ID GAR_REPOSITORY; do
+        if [ -z "$(eval echo "\$$var")" ]; then
+          echo "CI/CD variable $var is not set"
+          exit 1
+        fi
+      done
+
+    # Prepare Python environment
+    - apt-get update && apt-get install -y python3-venv coreutils && rm -rf /var/lib/apt/lists/*
+    - python3 -m venv /tmp/venv
+    - . /tmp/venv/bin/activate
+    - python -m pip install --upgrade pip
+    - python -m pip install --no-cache-dir twine keyrings.google-artifactregistry-auth
+
+    # Write the service account key (works for both Variable and File type variables)
+    - |
+      if [ -f "$GCP_CREDENTIALS" ]; then
+        cp "$GCP_CREDENTIALS" gcp-key.json
+      else
+        printf '%s' "$GCP_CREDENTIALS" > gcp-key.json
+      fi
+    - export GOOGLE_APPLICATION_CREDENTIALS="$CI_PROJECT_DIR/gcp-key.json"
+
+    # Authenticate Twine against Artifact Registry with the base64-encoded key
+    - export TWINE_USERNAME="_json_key_base64"
+    - export TWINE_PASSWORD="$(base64 -w0 gcp-key.json 2>/dev/null || base64 gcp-key.json | tr -d '\n')"
+
+    # Target Artifact Registry Python repository
+    - export GAR_BASE="https://${GAR_LOCATION}-python.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPOSITORY}"
+
+  script:
+    - ls -al dist
+    - python -m twine upload --verbose --repository-url "$GAR_BASE/" dist/*

@@ -1,0 +1,47 @@
+# Build the MkDocs site and its Nginx container image on GitHub, then check
+# that the container serves the site. Deploying to GCS and Cloud Run is
+# handled by docs-site/.gitlab-ci.yml.
+name: docs-site
+
+on:
+  push:
+    branches: [main]
+    paths: ["docs-site/**", ".github/workflows/docs-site.yml"]
+  pull_request:
+    paths: ["docs-site/**", ".github/workflows/docs-site.yml"]
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: docs-site
+
+jobs:
+  build-site:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: mkdocs build --strict -d site
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: docs-site/site
+
+  build-image:
+    needs: build-site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t mkdocs-site:ci .
+      - name: Smoke test the container
+        run: |
+          docker run -d --name site -p 8080:8080 mkdocs-site:ci
+          for i in $(seq 1 10); do
+            curl -fs http://localhost:8080/ | grep -q "<title>tempconv</title>" && exit 0
+            sleep 1
+          done
+          docker logs site
+          exit 1
