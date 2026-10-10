@@ -111,10 +111,6 @@ Pipelines on `master` of the site ran `build` and the deploy to Cloud Storage:
 
 ![GitLab pipelines of the documentation site](screenshots/gitlab-mkdocs-pipelines-1.png)
 
-The Google Cloud project behind these runs has since been shut down, so the published package and
-the deployed site are no longer online. Running the pipelines again needs a new project and the
-variables above.
-
 ## Project layout
 
 ```
